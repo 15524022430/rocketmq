@@ -86,6 +86,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         return false;
     }
 
+    /** * broker 端处理 consumer 的消息拉取 */
     private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend)
             throws RemotingCommandException {
         final long beginTimeMills = this.brokerController.getMessageStore().now();
@@ -106,6 +107,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
 
         SubscriptionGroupConfig subscriptionGroupConfig =
                 this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getConsumerGroup());
+        // 如果 broker 没有保存消费者组配置信息，则直接返回
         if (null == subscriptionGroupConfig) {
             response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
             response.setRemark(String.format("subscription group [%s] does not exist, %s", requestHeader.getConsumerGroup(), FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST)));
@@ -118,12 +120,17 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             return response;
         }
 
+        // 当 broker 端没有拉取到消息时，broker 端是否进行阻塞等待
         final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(requestHeader.getSysFlag());
+        // 是否上报消费偏移量
         final boolean hasCommitOffsetFlag = PullSysFlag.hasCommitOffsetFlag(requestHeader.getSysFlag());
+        // 是否可以从请求头中子表达式过滤消息
         final boolean hasSubscriptionFlag = PullSysFlag.hasSubscriptionFlag(requestHeader.getSysFlag());
 
+        // 当没有消息时，Broker 端等待消息时间
         final long suspendTimeoutMillisLong = hasSuspendFlag ? requestHeader.getSuspendTimeoutMillis() : 0;
 
+        // 验证 broker 上是否存的有此 topic 名称的配置（内部的topic、生产者发送的topic 都会存储在 topicConfigTable[是一个ConcurrentMap] 中）
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
         if (null == topicConfig) {
             log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), RemotingHelper.parseChannelRemoteAddr(channel));
@@ -178,6 +185,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 return response;
             }
 
+            // 如果这个消费者组配置的不是广播消费，而消费者拉取消息的时候采用的是广播模式拉取，则直接返回
             if (!subscriptionGroupConfig.isConsumeBroadcastEnable()
                     && consumerGroupInfo.getMessageModel() == MessageModel.BROADCASTING) {
                 response.setCode(ResponseCode.NO_PERMISSION);
@@ -185,6 +193,9 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 return response;
             }
 
+            /* * consumer 向 broker 拉取消息时，自然是要告诉 broker拉取的是哪个 topic.
+            * * 如果 broker 保存的这个消费者组订阅的信息里没有查询到这个 topic 名称，就打印了这个【 the consumer's subscription not exist 】 日志。
+            * * 所以在我们的相同 topic 不同 tag 的例子中，当 consumer2 上传了心跳信息，consumer1 再次拉取消息的时候就会在这里返回。 */
             subscriptionData = consumerGroupInfo.findSubscriptionData(requestHeader.getTopic());
             if (null == subscriptionData) {
                 log.warn("the consumer's subscription not exist, group: {}, topic:{}", requestHeader.getConsumerGroup(), requestHeader.getTopic());
@@ -192,7 +203,8 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 response.setRemark("the consumer's subscription not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
                 return response;
             }
-
+            /* * 这里会有一个消费者订阅此 topic 信息的版本号 和 broker 上保存的这个消费者组的此 topic 的版本号进行对比。
+            * * 现在你知道版本号高的一定会覆盖低的版本号了吧。RocketMQ 为什么要设计版本号呢？因为订阅信息是会发生改变的啊。 */
             if (subscriptionData.getSubVersion() < requestHeader.getSubVersion()) {
                 log.warn("The broker's subscription is not latest, group: {} {}", requestHeader.getConsumerGroup(),
                         subscriptionData.getSubString());
@@ -200,6 +212,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 response.setRemark("the consumer's subscription not latest");
                 return response;
             }
+            /* * 如果过滤消息的类型不是 tag 类型，则会用 MessageFilter 来获取消息并过滤返回。（我们一般用的都是 tag 类型过滤） */
             if (!ExpressionType.isTagType(subscriptionData.getExpressionType())) {
                 consumerFilterData = this.brokerController.getConsumerFilterManager().get(requestHeader.getTopic(),
                         requestHeader.getConsumerGroup());
@@ -217,7 +230,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 }
             }
         }
-
+        /* * 获取消息的时候，既不是 tag 类型的过滤，也没有开启 MessageFilter 过滤，那就直接返回。 */
         if (!ExpressionType.isTagType(subscriptionData.getExpressionType())
                 && !this.brokerController.getBrokerConfig().isEnablePropertyFilter()) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
@@ -233,7 +246,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             messageFilter = new ExpressionMessageFilter(subscriptionData, consumerFilterData,
                     this.brokerController.getConsumerFilterManager());
         }
-
+        /* * 读取消息（如果内存里面没有，则会从硬盘里面读取） */
         final GetMessageResult getMessageResult =
                 this.brokerController.getMessageStore().getMessage(requestHeader.getConsumerGroup(), requestHeader.getTopic(),
                         requestHeader.getQueueId(), requestHeader.getQueueOffset(), requestHeader.getMaxMsgNums(), messageFilter);

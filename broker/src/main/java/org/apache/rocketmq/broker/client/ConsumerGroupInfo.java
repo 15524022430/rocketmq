@@ -147,19 +147,33 @@ public class ConsumerGroupInfo {
         return updated;
     }
 
+    /** * 更新消费者的订阅信息 * subList 订阅的信息集合。如果订阅了5个主题，抛开内部主题（retry主题），此集合大小就是 5. */
     public boolean updateSubscription(final Set<SubscriptionData> subList) {
         boolean updated = false;
 
         for (SubscriptionData sub : subList) {
+            /** * 根据此次的心跳包的 topic 名字去查询 broker 端上保存之前订阅的 topic 信息。 * *
+             *  解释：如果 consumer1 和 consumer2 属于同一个组，consumer1 订阅的主题名称是 testTopic1,
+             *  * consumer2 订阅的主题名称是 testTopic2.
+             *  * 当 consumer1 上传心跳的时候，broker 自然会保存 testTopic1.
+             *  * 当 consumer2 紧跟着上传心跳的时候，
+             *  broker 就让就查询不到. 所以就会走【 this.subscriptionTable.putIfAbsent(sub.getTopic(), sub); 】 逻辑。 */
             SubscriptionData old = this.subscriptionTable.get(sub.getTopic());
+            // 如果没有可能是第一次心跳也可能是消费者的订阅信息发生了变更。
             if (old == null) {
+                // 这里你可能会怀疑，broker 岂不是保存了所有消费者订阅的主题名字的并集。别着急，会面会删除不是这个 consuemr 的订阅信息
                 SubscriptionData prev = this.subscriptionTable.putIfAbsent(sub.getTopic(), sub);
                 if (null == prev) {
+                    // 订阅信息变更了，明细是要返回 true 的
                     updated = true;
                     log.info("subscription changed, add new topic, group: {} {}",
                             this.groupName,
                             sub.toString());
                 }
+                /* * 这个订阅时间比较逻辑很好的说明后订阅的信息会覆盖先订阅的信息。也很好的说明了【相同 topic 不同 tag】情况。
+                * * 解释：同一个消费者组后启动的消费者订阅信息会覆盖先启动的消费者订阅信息。
+                * * consumer1 订阅信息主题：testTopic1，tag：tagA * consumer2 订阅信息主题：testTopic1，tag：tagB
+                * * consuemr1 先启动，consumer2 后启动。那 broker 自然保存的订阅信息是 consumer2 的订阅信息。 */
             } else if (sub.getSubVersion() > old.getSubVersion()) {
                 if (this.consumeType == ConsumeType.CONSUME_PASSIVELY) {
                     log.info("subscription changed, group: {} OLD: {} NEW: {}",
@@ -192,7 +206,8 @@ public class ConsumerGroupInfo {
                         oldTopic,
                         next.getValue().toString()
                 );
-
+                /** * 如果 broker 之前保存的主题名称在此次 consumer 上传的主题名称不存在，则删除之前保存的主题名称。
+                 * * 为什么删除：因为对 broker 来说，这个消费组的订阅信息发生了变更。 */
                 it.remove();
                 updated = true;
             }
