@@ -199,13 +199,14 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         this.offsetStore = offsetStore;
     }
 
+    /** * consumer 向 broker 获取消息核心代码 * @param pullRequest 获取消息时，请求 broker 的参数 */
     public void pullMessage(final PullRequest pullRequest) {
         final ProcessQueue processQueue = pullRequest.getProcessQueue();
         if (processQueue.isDropped()) {
             log.info("the pull request[{}] is dropped.", pullRequest.toString());
             return;
         }
-
+// 设置此次拉取消息的时间戳
         pullRequest.getProcessQueue().setLastPullTimestamp(System.currentTimeMillis());
 
         try {
@@ -215,7 +216,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
             return;
         }
-
+// 如果是停止状态则不获取消息（重平衡的时候，就会更改此状态为暂停状态）
         if (this.isPause()) {
             log.warn("consumer was paused, execute pull request later. instanceName={}, group={}", this.defaultMQPushConsumer.getInstanceName(), this.defaultMQPushConsumer.getConsumerGroup());
             this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_SUSPEND);
@@ -225,6 +226,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         long cachedMessageCount = processQueue.getMsgCount().get();
         long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);
 
+        /* * 一个 consuemr 拉取消息的数量不能超过默认的 1000 条 * 注意：是一个队列 1000 条哦.因为 consumer 拉取消息是一个队列一个队列的拉取消息 * 否则要就行流控 */
         if (cachedMessageCount > this.defaultMQPushConsumer.getPullThresholdForQueue()) {
             this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);
             if ((queueFlowControlTimes++ % 1000) == 0) {
@@ -234,7 +236,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             }
             return;
         }
-
+        /* * 一个consuemr 拉取消息的物理大小不能超过 100M.(如果一个消息的最大大小是 1M，那么就相当于 consumer 端最多一次缓存 100 条消息。) * 注意：是一个队列 100M 条哦.因为 consumer 拉取消息是一个队列一个队列的拉取消息 * 否则就行流控 */
         if (cachedMessageSizeInMiB > this.defaultMQPushConsumer.getPullThresholdSizeForQueue()) {
             this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);
             if ((queueFlowControlTimes++ % 1000) == 0) {
@@ -244,7 +246,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             }
             return;
         }
-
+        /* * 如果允许消费者并发的消费消息的话（注意，并发并不是这多个队列同时进行消费，而是指拉取一个队列的消息集合时，这些消息可以同时消费）, * 同时消费消息时的偏移量最小的哪一条消息 和 偏移量最大的哪一条消息的差值不能超过 2000 * 否则就进行流控 */
         if (!this.consumeOrderly) {
             if (processQueue.getMaxSpan() > this.defaultMQPushConsumer.getConsumeConcurrentlyMaxSpan()) {
                 this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);
@@ -257,6 +259,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                 return;
             }
         } else {
+            /* * 顺序消费消息，需要对 broker 上的队列进行加锁才能访问 * ProcessQueue被锁定，第一次拉取消息，pullRequest初始化为未被锁定，首先计算拉取偏移量，然后向消息服务端拉取消息。 */
             if (processQueue.isLocked()) {
                 if (!pullRequest.isPreviouslyLocked()) {
                     long offset = -1L;
@@ -279,12 +282,13 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                     pullRequest.setNextOffset(offset);
                 }
             } else {
+// 顺序消费消息的时候，如果这个队列没有被锁定，则休息3秒，等待 broker 端对 messageQueue 进行锁定。
                 this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
                 log.info("pull message later because not locked in broker, {}", pullRequest);
                 return;
             }
         }
-
+        // 获取Topic 对应的订阅信息。若不存在，则延迟拉取消息
         final SubscriptionData subscriptionData = this.rebalanceImpl.getSubscriptionInner().get(pullRequest.getMessageQueue().getTopic());
         if (null == subscriptionData) {
             this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
@@ -295,8 +299,10 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         final long beginTimestamp = System.currentTimeMillis();
 
         PullCallback pullCallback = new PullCallback() {
+            // 消息拉取成功后的回调函数
             @Override
             public void onSuccess(PullResult pullResult) {
+                // 如果我们是拉取消息的过滤类型是 tag ， 这里 consuemr 端会再次过滤 tag 信息
                 if (pullResult != null) {
                     pullResult = DefaultMQPushConsumerImpl.this.pullAPIWrapper.processPullResult(pullRequest.getMessageQueue(), pullResult,
                             subscriptionData);
